@@ -1,1 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://smith-engineering.local/schemas/compile-gate-summary.schema.json",
+  "title": "PVPU-R1C Compile Gate Summary",
+  "type": "object",
+  "required": ["schema_version", "result", "code", "message", "annotation"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "result": {"enum": ["PASS", "FAIL"]},
+    "code": {"type": "string", "pattern": "^(OK|E[0-9]{3})$"},
+    "message": {"type": "string", "minLength": 1},
+    "annotation": {
+      "type": "object",
+      "required": ["level", "title", "file", "start_line", "end_line", "start_column", "end_column", "rule"],
+      "additionalProperties": false,
+      "properties": {
+        "level": {"enum": ["error", "warning", "notice"]},
+        "title": {"type": "string", "minLength": 1},
+        "file": {"type": "string"},
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1},
+        "start_column": {"type": "integer", "minimum": 1},
+        "end_column": {"type": "integer", "minimum": 1},
+        "rule": {"type": "string"}
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"code": {"const": "E201"}}, "required": ["code"]},
+      "then": {
+        "properties": {
+          "result": {"const": "FAIL"},
+          "annotation": {
+            "properties": {
+              "level": {"const": "error"},
+              "file": {"const": "rtl/pvpu_reset_sync.sv"},
+              "rule": {"const": "G2-DEV-001"}
+            }
+          }
+        }
+      }
+    }
+  ]
+}
 
