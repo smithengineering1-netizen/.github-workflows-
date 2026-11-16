@@ -1,24 +1,268 @@
-{
-  "$schema":"https://json-schema.org/draft/2020-12/schema",
-  "type":"object",
-  "required":["schema_version","result","code","message","annotation"],
-  "additionalProperties":false,
-  "properties":{
-    "schema_version":{"const":"1.0"},
-    "result":{"enum":["PASS","FAIL"]},
-    "code":{"type":"string","pattern":"^(OK|E[0-9]{3})$"},
-    "message":{"type":"string","minLength":1},
-    "annotation":{"type":"object","additionalProperties":false,
-      "required":["level","title","file","start_line","end_line","start_column","end_column","rule"],
-      "properties":{
-        "level":{"enum":["error","warning","notice"]},"title":{"type":"string","minLength":1},"file":{"type":"string"},
-        "start_line":{"type":"integer","minimum":1},"end_line":{"type":"integer","minimum":1},
-        "start_column":{"type":"integer","minimum":1},"end_column":{"type":"integer","minimum":1},"rule":{"type":"string"}
-      }
-    }
-  },
-  "allOf":[
-    {"if":{"properties":{"code":{"const":"E201"}},"required":["code"]},"then":{"properties":{"result":{"const":"FAIL"},"annotation":{"properties":{"level":{"const":"error"},"file":{"const":"rtl/pvpu_reset_sync.sv"},"rule":{"const":"G2-DEV-001"}}}}}},
-    {"if":{"properties":{"code":{"const":"E202"}},"required":["code"]},"then":{"properties":{"result":{"const":"FAIL"},"annotation":{"properties":{"level":{"const":"error"},"file":{"const":"rtl/pvpu_memories_pipe.sv"},"rule":{"const":"AR-SPAD-001"}}}}}}
-  ]
-}
+name: PVPU-R1C Revision C Compile Gate
+
+on:
+  workflow_dispatch:
+
+  push:
+    paths:
+      - 'rtl/**'
+      - 'tb/**'
+      - 'tcl/**'
+      - 'schemas/**'
+      - 'tests/**'
+      - '.github/workflows/pvpu_rev_c_compile_gate.yml'
+
+  pull_request:
+    paths:
+      - 'rtl/**'
+      - 'tb/**'
+      - 'tcl/**'
+      - 'schemas/**'
+      - 'tests/**'
+      - '.github/workflows/pvpu_rev_c_compile_gate.yml'
+
+env:
+  VIVADO_VERSION: '2026.1'
+  VIVADO_PREFERRED: 'C:\AMDDesignTools\2026.1\Vivado\bin\vivado.bat'
+  REPORT_DIR: 'reports\g2_revision_c'
+  AJV_CLI_VERSION: '5.0.0'
+
+jobs:
+
+  contract-tests:
+    name: JSON contracts and annotation fixtures
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Validate E201 fixture
+        shell: bash
+        run: |
+          npx --yes "ajv-cli@${AJV_CLI_VERSION}" validate \
+            --spec=draft2020 \
+            --all-errors \
+            -s schemas/compile_gate_summary.schema.json \
+            -d tests/fixtures/e201.fixture.json
+
+      - name: Validate E202 fixture
+        shell: bash
+        run: |
+          npx --yes "ajv-cli@${AJV_CLI_VERSION}" validate \
+            --spec=draft2020 \
+            --all-errors \
+            -s schemas/compile_gate_summary.schema.json \
+            -d tests/fixtures/e202.fixture.json
+
+      - name: Test E201 annotation contract
+        shell: pwsh
+        run: |
+          ./tests/test_e201_fixture.ps1 `
+            -Fixture tests/fixtures/e201.fixture.json
+
+      - name: Test E202 annotation contract
+        shell: pwsh
+        run: |
+          ./tests/test_e202_fixture.ps1 `
+            -Fixture tests/fixtures/e202.fixture.json
+
+  compile-gate:
+    name: Vivado compile-only gate
+    needs: contract-tests
+
+    runs-on:
+      - self-hosted
+      - Windows
+      - X64
+      - vivado-2026.1
+
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Resolve Vivado
+        id: vivado
+        shell: powershell
+        run: |
+          $candidates = @(
+            $env:VIVADO_PREFERRED,
+            "C:\AMDDesignTools\$env:VIVADO_VERSION\Vivado\bin\vivado.bat",
+            "C:\Xilinx\Vivado\$env:VIVADO_VERSION\bin\vivado.bat",
+            "C:\AMD\Vivado\$env:VIVADO_VERSION\bin\vivado.bat"
+          )
+
+          $vivado = $candidates |
+            Where-Object {
+              $_ -and (Test-Path $_)
+            } |
+            Select-Object -First 1
+
+          if (-not $vivado) {
+            $command = Get-Command vivado.bat `
+              -ErrorAction SilentlyContinue
+
+            if ($command) {
+              $vivado = $command.Source
+            }
+          }
+
+          if (-not $vivado) {
+            Write-Host (
+              "::error title=Vivado configuration::" +
+              "Vivado $env:VIVADO_VERSION not found"
+            )
+
+            exit 2
+          }
+
+          "vivado_bat=$vivado" >>
+            $env:GITHUB_OUTPUT
+
+          Write-Host (
+            "::notice title=Vivado configuration::" +
+            "Using $vivado"
+          )
+
+      - name: Run strict V3 gate
+        id: gate
+        continue-on-error: true
+        shell: cmd
+        run: |
+          if not exist "%REPORT_DIR%" (
+            mkdir "%REPORT_DIR%"
+          )
+
+          call "${{ steps.vivado.outputs.vivado_bat }}" ^
+            -mode batch ^
+            -source "tcl\compile_only_rev_c_strict_v3.tcl" ^
+            -log "%REPORT_DIR%\compile_only_strict_v3.log" ^
+            -journal "%REPORT_DIR%\compile_only_strict_v3.jou"
+
+      - name: Validate live JSON summary
+        if: always()
+        shell: powershell
+        run: |
+          $summary =
+            'reports/g2_revision_c/compile_only_strict_summary.json'
+
+          if (-not (Test-Path $summary)) {
+            Write-Host (
+              "::error title=PVPU-R1C evidence::" +
+              "JSON summary is missing"
+            )
+
+            exit 2
+          }
+
+          npx --yes `
+            "ajv-cli@$env:AJV_CLI_VERSION" `
+            validate `
+            --spec=draft2020 `
+            --all-errors `
+            -s schemas/compile_gate_summary.schema.json `
+            -d $summary
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host (
+              "::error file=$summary," +
+              "title=JSON Schema validation::" +
+              "Live summary violates the schema"
+            )
+
+            exit $LASTEXITCODE
+          }
+
+      - name: Emit live source annotation
+        if: always()
+        shell: powershell
+        run: |
+          $summary =
+            'reports/g2_revision_c/compile_only_strict_summary.json'
+
+          if (-not (Test-Path $summary)) {
+            exit 2
+          }
+
+          $result = Get-Content $summary -Raw |
+            ConvertFrom-Json
+
+          if ($result.result -eq 'FAIL') {
+            $a = $result.annotation
+
+            Write-Host (
+              "::error " +
+              "file=$($a.file)," +
+              "line=$($a.start_line)," +
+              "endLine=$($a.end_line)," +
+              "col=$($a.start_column)," +
+              "endColumn=$($a.end_column)," +
+              "title=$($a.title)::" +
+              "$($result.code): $($result.message)"
+            )
+          }
+          else {
+            Write-Host (
+              "::notice title=PVPU-R1C compile gate::" +
+              "Strict compile-only validation passed"
+            )
+          }
+
+      - name: Publish summary
+        if: always()
+        shell: powershell
+        run: |
+          '## PVPU-R1C Revision C compile gate' >>
+            $env:GITHUB_STEP_SUMMARY
+
+          $text =
+            'reports/g2_revision_c/compile_only_strict_summary.txt'
+
+          if (Test-Path $text) {
+            '```text' >>
+              $env:GITHUB_STEP_SUMMARY
+
+            Get-Content $text >>
+              $env:GITHUB_STEP_SUMMARY
+
+            '```' >>
+              $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pvpu-r1c-compile-gate
+          path: reports/g2_revision_c/
+          if-no-files-found: warn
+
+      - name: Enforce result
+        if: always()
+        shell: powershell
+        run: |
+          $summary =
+            'reports/g2_revision_c/compile_only_strict_summary.json'
+
+          if (-not (Test-Path $summary)) {
+            exit 2
+          }
+
+          $result = Get-Content $summary -Raw |
+            ConvertFrom-Json
+
+          if ($result.result -ne 'PASS') {
+            exit 2
+          }
