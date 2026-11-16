@@ -1,0 +1,66 @@
+name: RG03-CA-001 Vivado Regression
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+    paths:
+      - 'rtl/**'
+      - 'sim/**'
+      - '.github/workflows/rg03-ca001.yml'
+  pull_request:
+    paths:
+      - 'rtl/**'
+      - 'sim/**'
+      - '.github/workflows/rg03-ca001.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rg03-ca001:
+    # Requires a Windows x64 self-hosted runner with Vivado 2026.1 command tools on PATH.
+    runs-on: [self-hosted, windows, x64, vivado-2026.1]
+    timeout-minutes: 45
+    steps:
+      - name: Checkout controlled source
+        uses: actions/checkout@v4
+
+      - name: Record CI identity
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force reports/rg03_ca001_ci | Out-Null
+          "RUN_ID=${{ github.run_id }}" | Set-Content reports/rg03_ca001_ci/github_identity.txt
+          "RUN_ATTEMPT=${{ github.run_attempt }}" | Add-Content reports/rg03_ca001_ci/github_identity.txt
+          "SHA=${{ github.sha }}" | Add-Content reports/rg03_ca001_ci/github_identity.txt
+          "REF=${{ github.ref }}" | Add-Content reports/rg03_ca001_ci/github_identity.txt
+
+      - name: Verify Vivado simulator tools
+        shell: pwsh
+        run: |
+          xvlog -version
+          xelab -version
+          xsim -version
+
+      - name: Compile, elaborate, run assertions and compatibility check
+        shell: pwsh
+        run: ./run_rg03_ca001_ci.ps1
+
+      - name: Create evidence manifest
+        if: always()
+        shell: pwsh
+        run: |
+          $out='reports/rg03_ca001_ci/GHA_EVIDENCE_SHA256.txt'
+          Get-ChildItem reports/rg03_ca001_ci -File | Sort-Object Name | ForEach-Object {
+            $h=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash
+            "$h  $($_.Name)"
+          } | Set-Content $out
+
+      - name: Upload RG03 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rg03-ca001-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: reports/rg03_ca001_ci/
+          if-no-files-found: error
+          retention-days: 90
